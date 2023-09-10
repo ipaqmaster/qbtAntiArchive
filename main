@@ -1,0 +1,201 @@
+#!/bin/bash
+# For qBittorrent to detect and purge torrents with *many* files.
+
+function log {
+  if [ "$2" == 'stderr' ]
+  then
+    echo -e "$1" >&2
+  else
+    echo -e "$1"
+  fi
+  echo -e "$1" >> ${0}.log
+}
+
+function printHelp {
+  log
+  log "A script to help qBittorrent police the content Radarr and Sonarr fetch without"
+  log "checking grabbed torrent files and magnets for archive content or hundreds of files."
+  log
+  log "This is intended to be called by qBittorrent and can be added at the bottom of Options > Downloads"
+  log "In the 'Run external program on torrent added' section"
+  log
+  log "qBittorrent script Usage:"
+  log "\t$0"
+  log "\t    -radarr-addr http://radarr.local:80  # Radarr HTTP UI Address"
+  log "\t    -radarr-apikey 4301g2j21e4fgj089     # Radarr API Key"
+  log "\t    -sonarr-addr http://sonarr.local:80  # Sonarr HTTP UI Address"
+  log "\t    -sonarr-apikey 980jgf4e12j2g1034     # Sonarr API Key"
+  log "\t    -categories movies,tv                # Only run checks if torrent is in one of these categories"
+  log "\t    -filecountthreshold 5                # Reject torrents on Sonarr/Radarr if they contain more than this many files."
+  log ""
+  log "Special arguments for qBittorrent:"
+  log "\t    -torrentName \"%N\"                  # The torrent's name qBittorrent."
+  log "\t    -torrentFileCount \"%C\"             # The file count of this torrent from qBittorrent."
+  log "\t    -torrentCategory \"%L\"              # The torrent's category."
+  exit 1
+}
+
+function getTorrentId {
+  addr="$1"
+  apikey="$2"
+  if queueDetails=$(curl --fail -Ss -XGET "${addr}/api/v3/queue/details?apikey=${apikey}" 2>&1)
+  then
+    result=$(jq ".[] | select (.title | contains(\"${torrentName}\")) | .id" <<< ${queueDetails})
+    if [ -n "${result}" ]
+    then
+      echo "${result}"
+    #else
+    #  log "No match from ${addr}" 'stderr'
+    fi
+  else
+    log "Failed to get queue details from: $addr" 'stderr'
+    log "${queueDetails}" 'stderr'
+    log "Panicking..." 'stderr'
+    exit 1
+  fi
+}
+
+function handleTorrent {
+  if [ -n "${radarr_addr}" ] && [ -n "${radarr_apikey}" ]
+  then # Check Radarr
+    torrentId=$(getTorrentId "${radarr_addr}" "${radarr_apikey}")
+    if [[ -n $torrentId ]]
+    then
+      curl -Ss -XDELETE "${radarr_addr}/api/v3/queue/${torrentId}?apikey=${radarr_apikey}&removeFromClient=true&blocklist=true&skipRedownload=false"
+      return $?
+    fi
+
+  if [ -n "${sonarr_addr}" ] && [ -n "${sonarr_apikey}" ]
+  then # Check Radarr
+    torrentId=$(getTorrentId "${sonarr_addr}" "${sonarr_apikey}")
+    if [[ -n $torrentId ]]
+    then
+      curl -Ss -XDELETE "${sonarr_addr}/api/v3/queue/${torrentId}?apikey=${sonarr_apikey}&removeFromClient=true&blocklist=true&skipRedownload=false"
+      return $?
+    fi
+
+    log "No match found in either Radarr or Sonarr." 'stderr'
+    return 0
+    fi
+  fi
+
+  log "Failed to get queue details from either Radarr or Sonarr. Unable to match this torrent to a downloader." 'stderr'
+  log "Panicking..." 'stderr'
+  exit 1
+}
+
+if [ $# -eq 0 ]
+then
+  printHelp
+fi
+
+while [ $# -gt 0 ]
+do
+  case "$(tr '[:upper:]' '[:lower:]'<<<$1)" in
+    -radarr-addr)
+      radarr_addr="$2"
+      shift
+    ;;
+    -radarr-apikey)
+      radarr_apikey="$2"
+      shift
+    ;;
+    -sonarr-addr)
+      sonarr_addr="$2"
+      shift
+    ;;
+    -sonarr-apikey)
+      sonarr_apikey="$2"
+      shift
+    ;;
+   -categories)
+      categories=(${2/,/ })
+      shift
+    ;;
+    -filecountthreshold)
+      fileCountThreshold="$2"
+      shift
+    ;;
+    -torrentname)
+      torrentName="$2"
+      shift
+    ;;
+    -torrentfilecount)
+      torrentFileCount="$2"
+      shift
+    ;;
+    -torrentcategory)
+      torrentCategory="$2"
+      shift
+    ;;
+    *)
+      log "Unrecognised option $2"
+      printHelp
+    ;;
+  esac
+  shift
+done
+
+
+# Prepare
+
+
+  # Check torrent name and file-count provided
+if [ -z "${torrentName}" ] || [ -z "${torrentFileCount}" ]
+then
+  log "Need -torrentName & -torrentFilecount to continue "
+  exit 1
+fi
+
+if ! [[ ${torrentFileCount} =~ ^[0-9]+$ ]]
+then
+  log "-torrentFileCount needs to be a number!"
+  exit 1
+fi
+
+if [ -z "${fileCountThreshold}" ]
+then
+  log "Need to define -filecountthreshold"
+  exit 1
+fi
+
+if [ -z "${radarr_addr}" ] && [ -z "${sonarr_addr}" ]
+then
+  log "Need at least a radarr or sonarr address to function."
+  exit 1
+fi
+
+if [ -z "${radarr_apikey}" ] && [ -z "${sonarr_apikey}" ]
+then
+  log "Need at least a radarr or sonarr apikey to function."
+  exit 1
+fi
+
+# Run
+log "Processing ${torrentName}..."
+
+if [ -n "$categories" ]
+then
+  if ! [[ "${categories[@]}" =~ "${torrentCategory}" ]]
+  then
+    log "No match for $torrentCategory in categories provided: ${categories[@]}."
+    log "Skipping torrent."
+    exit 0
+  fi
+else
+  eco "No -categories specified, continuing..."
+fi
+
+
+if [ ${torrentFileCount} -ge ${fileCountThreshold} ]
+then
+  log "Torrent has too many files (${torrentFileCount})"
+
+  torrentId=$(handleTorrent)
+  if [ -n "${torrentId}" ]
+  then
+    curl -Ss -XDELETE "${addr}/api/v3/queue/${torrentId}?apikey=${apikey}&removeFromClient=true&blocklist=true&skipRedownload=false"
+  fi
+fi
+
+
