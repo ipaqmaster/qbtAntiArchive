@@ -1,6 +1,9 @@
 #!/bin/bash
 # For qBittorrent to detect and purge torrents with *many* files.
 
+#exec &> >(tee ~/logfile)
+#set -x # Debugged rars not getting removed. Was the quoting in the url in the cmdline. qbittorrent settings.
+
 function log {
   if [ "$2" == 'stderr' ]
   then
@@ -10,6 +13,8 @@ function log {
   fi
   echo -e "$1" >> ${0}.log
 }
+
+echo -e "All args: ${@}" >> ${0}.log
 
 function printHelp {
   log
@@ -122,6 +127,12 @@ do
     ;;
     -torrentfilecount)
       torrentFileCount="$2"
+      if [[ "${torrentFileCount}" =~ - ]]
+      then
+        log "Dropping leading minus from torrent file count..."
+        torrentFileCount=${torrentFileCount//-/}
+      fi
+      
       shift
     ;;
     -torrentcategory)
@@ -139,6 +150,11 @@ done
 
 # Prepare
 
+if [[ "${torrentFileCount}" =~ % ]]
+then
+  log "It seems vars have not been filled in correctly by qBt. Exiting..."
+  exit 1
+fi
 
   # Check torrent name and file-count provided
 if [ -z "${torrentName}" ] || [ -z "${torrentFileCount}" ]
