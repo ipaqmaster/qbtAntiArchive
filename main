@@ -46,48 +46,61 @@ function getTorrentId {
   if queueDetails=$(curl --fail -Ss -XGET "${addr}/api/v3/queue/details?apikey=${apikey}" 2>&1)
   then
     result=$(jq ".[] | select (.title | contains(\"${torrentName}\")) | .id" <<< ${queueDetails})
-    if [ -n "${result}" ]
-    then
-      echo "${result}"
-    #else
-    #  log "No match from ${addr}" 'stderr'
-    fi
+    [ -n "${result}" ] && echo "${result}"
   else
-    log "Failed to get queue details from: $addr" 'stderr'
+    log "Failed to get queue details from ${addr}" 'stderr'
     log "${queueDetails}" 'stderr'
-    log "Panicking..." 'stderr'
-    exit 1
   fi
 }
 
 function handleTorrent {
-  if [ -n "${radarr_addr}" ] && [ -n "${radarr_apikey}" ]
-  then # Check Radarr
-    torrentId=$(getTorrentId "${radarr_addr}" "${radarr_apikey}")
-    if [[ -n $torrentId ]]
+  # Check for the torrent in Radar and Sonarr for deletion.
+
+  # Check each 30 times in case the torrent hasn't been added to their lists yet
+  log "Searching for torrent in either Sonarr or Radar..." 'stderr'
+  count=0 timeout=30
+  while [ -z "${torrentId}" ] && [ ${count} -lt ${timeout} ]
+  do
+
+    # Check Radarr
+    if [ -n "${radarr_addr}" ] && [ -n "${radarr_apikey}" ]
     then
-      curl -Ss -XDELETE "${radarr_addr}/api/v3/queue/${torrentId}?apikey=${radarr_apikey}&removeFromClient=true&blocklist=true&skipRedownload=false"
-      return $?
+
+      torrentId=$(getTorrentId "${radarr_addr}" "${radarr_apikey}")
+      if [[ -n "${torrentId}" ]]
+      then
+        [ $count -gt 0 ] && log "Got result after ${count} retries..." 'stderr'
+        echo "Matched Radarr download ID: ${torrentId}"
+        isDry && echo "Dry mode active. Not deleting." || curl -Ss -XDELETE "${radarr_addr}/api/v3/queue/${torrentId}?apikey=${radarr_apikey}&removeFromClient=true&blocklist=true&skipRedownload=false"
+        return $?
+      fi
     fi
 
-  if [ -n "${sonarr_addr}" ] && [ -n "${sonarr_apikey}" ]
-  then # Check Radarr
-    torrentId=$(getTorrentId "${sonarr_addr}" "${sonarr_apikey}")
-    if [[ -n $torrentId ]]
+    # Check Sonarr
+    if [ -n "${sonarr_addr}" ] && [ -n "${sonarr_apikey}" ]
     then
-      curl -Ss -XDELETE "${sonarr_addr}/api/v3/queue/${torrentId}?apikey=${sonarr_apikey}&removeFromClient=true&blocklist=true&skipRedownload=false"
-      return $?
+
+      torrentId=$(getTorrentId "${sonarr_addr}" "${sonarr_apikey}")
+      if [[ -n "${torrentId}" ]]
+      then
+        [ $count -gt 0 ] && log "Got result after ${count} retries..." 'stderr'
+        echo "Matched Sonarr download ID: ${torrentId}"
+        isDry && echo "Dry mode active. Not deleting." || curl -Ss -XDELETE "${sonarr_addr}/api/v3/queue/${torrentId}?apikey=${sonarr_apikey}&removeFromClient=true&blocklist=true&skipRedownload=false"
+        return $?
+      fi
     fi
 
-    log "No match found in either Radarr or Sonarr." 'stderr'
-    return 0
-    fi
-  fi
+    sleep 1
+    ((count++))
+  done
 
-  log "Failed to get queue details from either Radarr or Sonarr. Unable to match this torrent to a downloader." 'stderr'
+  log "No match found in either Radarr or Sonarr." 'stderr'
+  log "Unable to match this torrent to a downloader." 'stderr'
   log "Panicking..." 'stderr'
   exit 1
 }
+
+function isDry { [ -n "$dry" ] ; return $? ;}
 
 if [ $# -eq 0 ]
 then
@@ -97,6 +110,11 @@ fi
 while [ $# -gt 0 ]
 do
   case "$(tr '[:upper:]' '[:lower:]'<<<$1)" in
+    -dry)
+      log "Dry mode active. Won't delete a match."
+      dry=1
+      shift
+    ;;
     -radarr-addr)
       radarr_addr="$2"
       shift
@@ -132,7 +150,7 @@ do
         log "Dropping leading minus from torrent file count..."
         torrentFileCount=${torrentFileCount//-/}
       fi
-      
+
       shift
     ;;
     -torrentcategory)
@@ -206,12 +224,5 @@ fi
 if [ ${torrentFileCount} -ge ${fileCountThreshold} ]
 then
   log "Torrent has too many files (${torrentFileCount})"
-
-  torrentId=$(handleTorrent)
-  if [ -n "${torrentId}" ]
-  then
-    curl -Ss -XDELETE "${addr}/api/v3/queue/${torrentId}?apikey=${apikey}&removeFromClient=true&blocklist=true&skipRedownload=false"
-  fi
+  handleTorrent
 fi
-
-
